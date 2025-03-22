@@ -36,7 +36,7 @@ TextCast is an innovative web application that converts research papers (PDFs) i
 
 1. **Clone the Repository**:
    ```bash
-   git clone https://github.com/yourusername/textcast.git
+   git clone https://github.com/yourusername/TextCast.git
    cd textcast
    ```
 
