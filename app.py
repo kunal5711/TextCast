@@ -2,6 +2,7 @@ import os
 import sys
 import logging
 import subprocess
+from dotenv import load_dotenv
 
 # Dependency checks
 try:
@@ -62,8 +63,10 @@ except Exception as e:
     logger.warning(f"Embedding is not able to load {e}")
     sys.exit(1)
 
+load_dotenv()
 try:
-    LLM = ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
+    api = os.environ["GROQ_API_KEY"]
+    LLM = ChatGroq(model="llama-3.3-70b-versatile", temperature=0, api_key=api)
 except Exception as e:
     logger.warning(f"LLM is not able to load {e}")
     sys.exit()
