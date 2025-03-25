@@ -195,7 +195,10 @@ def speech_to_text(audio_path):
         logger.error(f"Transcription error: {e}")
         return None
 
-INTERACTIVE_TEMPLATE = ChatPromptTemplate.from_template(
+def generate_response(question, retriever):
+    """Generate a conversational response using RAG."""
+    try:
+        INTERACTIVE_TEMPLATE = ChatPromptTemplate.from_template(
     """You're Mia, an expert on a research paper's page summaries. A user asked about the paper. Create a short, lively response where:
 
 Mia answers simply, using the summaries and her expertise, with natural flow.
@@ -206,11 +209,7 @@ Use the summaries: {context}
 Question: {question}
 
 Keep it dialogue-only, short, and natural."""
-)
-
-def generate_response(question, retriever):
-    """Generate a conversational response using RAG."""
-    try:
+        )
         rag_chain = (
             {"context": retriever, "question": RunnablePassthrough()}
             | INTERACTIVE_TEMPLATE
@@ -222,7 +221,7 @@ def generate_response(question, retriever):
         return response
     except Exception as e:
         logger.error(f"Response generation error: {e}")
-        return "Sophia: Hey, I'm not able to understand the question. Please, repeat again!\nMia: Yeah, let's hear it one more time!"
+        return "Hey, I'm not able to understand the question. Please, repeat again!"
     
 def script_to_audio_answer(script, output_path):
     """Convert script to audio and combine into a single file."""
