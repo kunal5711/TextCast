@@ -1,23 +1,41 @@
-from flask import Flask, render_template, jsonify, request
 import os
+import sys
 import logging
 import subprocess
-from pdfminer.high_level import extract_pages
-from pdfminer.layout import LTTextBoxHorizontal
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
-from langchain_groq import ChatGroq
-from langchain.prompts import ChatPromptTemplate
-from groq import Groq
-import whisper
-from gtts import gTTS
-from langchain_community.document_loaders.text import TextLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
+
+# Dependency checks
+try:
+    import flask
+    from flask import Flask, render_template, jsonify, request
+    import whisper
+    from gtts import gTTS
+    import pdfminer
+    from pdfminer.high_level import extract_pages
+    from pdfminer.layout import LTTextBoxHorizontal
+    from langchain_core.output_parsers import StrOutputParser
+    from langchain_core.runnables import RunnablePassthrough
+    from langchain_groq import ChatGroq
+    from langchain.prompts import ChatPromptTemplate
+    from groq import Groq
+    from langchain_community.document_loaders.text import TextLoader
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+    from langchain_community.vectorstores import FAISS
+    from langchain_huggingface import HuggingFaceEmbeddings
+except ImportError as e:
+    print(f"Missing dependency: {e}")
+    print("Please install required dependencies using:")
+    print("pip install flask whisper gtts pdfminer.six langchain-groq groq langchain-huggingface")
+    sys.exit(1)
+
+# Check FFmpeg
+try:
+    subprocess.run(["ffmpeg", "-version"], check=True, capture_output=True)
+except (subprocess.CalledProcessError, FileNotFoundError):
+    print("FFmpeg is not installed or not in PATH. Please install FFmpeg.")
+    sys.exit(1)
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500 MB max file size
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 500 MB max file size
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -33,9 +51,23 @@ os.makedirs(INPUT_DIR, exist_ok=True)
 os.makedirs(PODCAST_PATH, exist_ok=True)
 
 # Global models and retriever
-WHISPER_MODEL = whisper.load_model("base")
-EMBEDDINGS = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en", model_kwargs={"device": "cpu"}, encode_kwargs={"normalize_embeddings": True})
-LLM = ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
+try:
+    WHISPER_MODEL = whisper.load_model("base")
+except Exception as e:
+    logger.warning(f"Whisper model can't be loaded, {e}")
+
+try:
+    EMBEDDINGS = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en", model_kwargs={"device": "cpu"}, encode_kwargs={"normalize_embeddings": True})
+except Exception as e:
+    logger.warning(f"Embedding is not able to load {e}")
+    sys.exit(1)
+
+try:
+    LLM = ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
+except Exception as e:
+    logger.warning(f"LLM is not able to load {e}")
+    sys.exit()
+
 FAISS_RETRIEVER = None
 
 def extract_page_text(pdf_path):
@@ -56,12 +88,12 @@ def extract_page_text(pdf_path):
 def summarize_page(page_content):
     """Generate a 200-300 word summary for every single page."""
     try:
-        template = """Summarize the following research paper page in 200-300 words, focusing on its key insights, methods, and important discussions in a clear, simple tone for a general audience. Avoid technical jargon—explain complex ideas in everyday terms. If the page lacks specific details, infer the main takeaway based on the context. Here’s the page content:
+        template = """Summarize the following research paper page in 200-300 words, focusing on its key insights, methods, and important discussions in a clear, simple tone for a general audience. Avoid technical jargon—explain complex ideas in everyday terms. If the page lacks specific details, infer the main takeaway based on the context. Here's the page content:
 
 {page_content}
 
 Provide the summary in this format:
-- Key Insight: [One sentence on the page’s main takeaway]
+- Key Insight: [One sentence on the page's main takeaway]
 - Methods or Approach:
 - Important Discussion: """
         prompt = ChatPromptTemplate.from_template(template)
@@ -75,13 +107,16 @@ PODCAST_TEMPLATE = ChatPromptTemplate.from_template(
     """You are an AI podcast host named Sophia, and your guest, Mia, is an expert in the domain of the provided research paper.
 
 Create a 750-word podcast script (approximately 5-6 minutes when spoken) where:
-1. Sophia kicks off with an enthusiastic, casual intro that hooks listeners into the topic.
-2. Sophia and Mia discuss the research paper’s key insights in simple, relatable terms, bouncing ideas off each other naturally.
+1. Sophia starts with an enthusiastic, casual intro that hooks listeners into the topic.
+2. Sophia and Mia discuss the research paper's key insights in simple, relatable terms, bouncing ideas off each other naturally.
 3. They explore the real-world impact of the findings together, sharing excitement and curiosity.
-4. The conversation wraps up with Sophia posing a fun, thought-provoking closing question, and Mia responding with energy.
+4. Sophia ends with a fun, thought-provoking closing question, and Mia responds energetically.
 
-Use a lively, conversational tone with natural dialogue only between Sophia and Mia. Include paralanguage like laughs, pauses, excitedly, or thoughtfully to make it feel human and engaging, but don't mention these words in the podcast, avoiding a stiff Q&A format. Let them interrupt, agree, or riff off each other to mimic a real discussion.
-Research Paper content: {context}
+Use a lively, conversational tone with natural dialogue only between Sophia and Mia. Format the script with each speaker's lines prefixed as:
+Sophia:
+Mia:
+
+Include paralanguage like laughs, pauses, excitedly, or thoughtfully to make it engaging, but don't mention these words in the spoken text. Let them interrupt, agree, or riff off each other for a real discussion feel. Research Paper content: {context}
 
 Now generate the podcast script."""
 )
@@ -99,32 +134,27 @@ def get_response(content):
 def script_to_audio(script, output_path):
     """Convert script to audio and combine into a single file."""
     try:
+        # Ensure script is a string if it's not already
+        if not isinstance(script, str):
+            script = str(script)
+
         sophia_lines = [line.replace("Sophia:", "").strip() for line in script.split("\n") if line.startswith("Sophia:")]
         mia_lines = [line.replace("Mia:", "").strip() for line in script.split("\n") if line.startswith("Mia:")]
         audio_files = []
 
-        for i, (sophia, mia) in enumerate(zip(sophia_lines, mia_lines)):
-            tts = gTTS(sophia, lang="en", tld="co.za")
-            sophia_path = os.path.join(PODCAST_PATH, f"sophia_{i}.mp3")
-            tts.save(sophia_path)
-            audio_files.append(sophia_path)
+        # Adjust the zip to handle cases with unequal line counts
+        for i in range(max(len(sophia_lines), len(mia_lines))):
+            if i < len(sophia_lines):
+                tts = gTTS(sophia_lines[i], lang="en", tld="co.za")
+                sophia_path = os.path.join(PODCAST_PATH, f"sophia_{i}.mp3")
+                tts.save(sophia_path)
+                audio_files.append(sophia_path)
 
-            tts = gTTS(mia, lang="en", tld="co.uk")
-            mia_path = os.path.join(PODCAST_PATH, f"mia_{i}.mp3")
-            tts.save(mia_path)
-            audio_files.append(mia_path)
-
-        for i, line in enumerate(sophia_lines[len(mia_lines):], start=len(mia_lines)):
-            tts = gTTS(line, lang="en", tld="co.za")
-            temp_path = os.path.join(PODCAST_PATH, f"sophia_{i}.mp3")
-            tts.save(temp_path)
-            audio_files.append(temp_path)
-
-        for i, line in enumerate(mia_lines[len(sophia_lines):], start=len(sophia_lines)):
-            tts = gTTS(line, lang="en", tld="co.uk")
-            temp_path = os.path.join(PODCAST_PATH, f"mia_{i}.mp3")
-            tts.save(temp_path)
-            audio_files.append(temp_path)
+            if i < len(mia_lines):
+                tts = gTTS(mia_lines[i], lang="en", tld="co.uk")
+                mia_path = os.path.join(PODCAST_PATH, f"mia_{i}.mp3")
+                tts.save(mia_path)
+                audio_files.append(mia_path)
 
         if audio_files:
             ffmpeg_cmd = ["ffmpeg", "-i", f"concat:{'|'.join(audio_files)}", "-acodec", "copy", output_path]
@@ -166,18 +196,16 @@ def speech_to_text(audio_path):
         return None
 
 INTERACTIVE_TEMPLATE = ChatPromptTemplate.from_template(
-    """You’re Sophia, an AI podcast host, chatting with Mia, an expert on a research paper’s page summaries. A user asked about the paper. Create a short, lively dialogue where:
-    1. Sophia casually intros the question.
-    2. Mia answers simply, using the summaries and her expertise.
-    3. They riff naturally.
+    """You're Mia, an expert on a research paper's page summaries. A user asked about the paper. Create a short, lively response where:
 
-    If the question’s unclear, say: "I can’t catch that—could you repeat it?"
+Mia answers simply, using the summaries and her expertise, with natural flow.
+If the question's unclear, say: "I can't quite catch that—could you repeat it?"
 
-    Use the summaries: {context}
+Use the summaries: {context}
 
-    Question: {question}
+Question: {question}
 
-    Keep it dialogue-only, with natural flow."""
+Keep it dialogue-only, short, and natural."""
 )
 
 def generate_response(question, retriever):
@@ -194,7 +222,40 @@ def generate_response(question, retriever):
         return response
     except Exception as e:
         logger.error(f"Response generation error: {e}")
-        return "Sophia: Hey, I’m not able to understand the question. Please, repeat again!\nMia: Yeah, let’s hear it one more time!"
+        return "Sophia: Hey, I'm not able to understand the question. Please, repeat again!\nMia: Yeah, let's hear it one more time!"
+    
+def script_to_audio_answer(script, output_path):
+    """Convert script to audio and combine into a single file."""
+    try:
+        audio_files = []
+        with open("audio_script", "w") as file:
+            file.writelines(script)
+
+        # Ensure script is a string, split by lines if needed
+        if isinstance(script, str):
+            script_lines = script.split('\n')
+        else:
+            script_lines = script
+
+        for i, line in enumerate(script_lines):
+            tts = gTTS(line, lang="en", tld="co.uk")
+            mia_path = os.path.join(PODCAST_PATH, f"mia_{i}.mp3")
+            tts.save(mia_path)
+            audio_files.append(mia_path)
+
+        if audio_files:
+            ffmpeg_cmd = ["ffmpeg", "-i", f"concat:{'|'.join(audio_files)}", "-acodec", "copy", output_path]
+            subprocess.run(ffmpeg_cmd, check=True, capture_output=True)
+            for temp_file in audio_files:
+                os.remove(temp_file)
+            return True
+        return False
+    except subprocess.CalledProcessError as e:
+        logger.error(f"FFmpeg failed: {e.stderr.decode()}")
+        return False
+    except Exception as e:
+        logger.error(f"Error in script_to_audio_answer: {e}")
+        return False
 
 @app.route("/", methods=["GET"])
 def home():
@@ -217,6 +278,7 @@ def upload_file():
             os.remove(file_path)
             logger.info(f"Removed old main file: {file_path}")
 
+    file_path = None
     try:
         if 'pdf' not in request.files:
             logger.error("No file part in request")
@@ -236,8 +298,6 @@ def upload_file():
         FAISS_RETRIEVER = initialize_vector_store(summaries)  # Initialize retriever once
         podcast_script = get_response(summaries)
         logger.info("Podcast script generated")
-        with open("script.txt", "w") as file:
-            file.write(podcast_script)
         success = script_to_audio(podcast_script, os.path.join(PODCAST_PATH, "podcast.mp3"))
 
         if success:
@@ -254,11 +314,12 @@ def upload_file():
         return jsonify({"error": "Internal server error"}), 500
     
     finally:
-        if os.path.exists(file_path):
+        if file_path and os.path.exists(file_path):
             os.remove(file_path)
 
 @app.route("/ask-question", methods=["POST"])
 def ask_question():
+    audio_path = None
     try:
         if "audio" not in request.files:
             logger.error("No audio uploaded")
@@ -282,7 +343,7 @@ def ask_question():
             raise ValueError("Vector store not initialized. Upload a PDF first.")
 
         response = generate_response(question, FAISS_RETRIEVER)
-        success = script_to_audio(response, os.path.join(PODCAST_PATH, "response.mp3"))
+        success = script_to_audio_answer(response, os.path.join(PODCAST_PATH, "response.mp3"))
 
         if success:
             logger.info(f"Response saved to {PODCAST_PATH}/response.mp3")
@@ -297,7 +358,7 @@ def ask_question():
         logger.error(f"Error processing question: {e}")
         return jsonify({"error": "Internal server error"}), 500
     finally:
-        if os.path.exists(audio_path):
+        if audio_path and os.path.exists(audio_path):
             os.remove(audio_path)
 
 if __name__ == "__main__":
